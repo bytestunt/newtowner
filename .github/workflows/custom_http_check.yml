@@ -1,0 +1,36 @@
+name: Custom HTTP Check
+run-name: Custom ${{ github.event.inputs.run_id_tag }}
+on:
+  workflow_dispatch:
+    inputs:
+      spec_b64:
+        description: 'Base64 JSON spec: {"method","url","headers","body"}'
+        required: true
+        type: string
+      run_id_tag:
+        description: 'Unique tag for artifact name and run matching'
+        required: true
+        type: string
+
+jobs:
+  custom_check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install dependencies
+        run: pip install requests
+      - name: Decode spec
+        run: echo "${{ github.event.inputs.spec_b64 }}" | base64 -d > spec.json
+      - name: Run custom HTTP runner
+        run: python scripts/custom_http_runner.py spec.json
+      - name: Upload result artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-check-${{ github.event.inputs.run_id_tag }}
+          path: result.json
+          retention-days: 1
