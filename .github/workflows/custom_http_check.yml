@@ -32,5 +32,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: custom-check-${{ github.event.inputs.run_id_tag }}
-          path: result.json
+          path: result*.json
           retention-days: 1
